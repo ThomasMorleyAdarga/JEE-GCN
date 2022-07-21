@@ -82,7 +82,7 @@ def main(input, output):
 
             if len(entire_block) > max_seq_len: max_seq_len = len(entire_block)
 
-    print(max_seq_len)
+    print(len(ace_formatted))
 
     f.close()
     with open(out_file, 'w') as o:

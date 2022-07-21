@@ -11,9 +11,19 @@ from scipy.spatial.distance import cosine
 from transformers import BertTokenizer, BertModel
 
 
-def produce_batch(ace_dataset, split_category, i):
+def produce_embeddings(ace_dataset, split_category, output_file):
 
-    print('hi')
+    data = dict.fromkeys({'train', 'dev', 'test'})
+    data['train'] = dict.fromkeys({'X', 'Y', 'N'})
+    data['train']['X'], data['train']['Y'] = list(), list()
+
+    with open(output_file, "w") as f:
+        json.dump(data, f, indent=2)
+        f.close()
+
+
+    N = 0   #Count num samples
+
     #   ----    dictionary for event types  ---     #
     event_dict = {'B-Life:Marry': 0, 'I-Personnel:Start-Position': 1, 'I-Justice:Release-Parole': 2,
                   'B-Conflict:Attack': 3, 'B-Business:Start-Org': 4, 'B-Justice:Trial-Hearing': 5, 'B-Justice:Fine': 6,
@@ -134,7 +144,9 @@ def produce_batch(ace_dataset, split_category, i):
     gold_matrix_batch = list()
 
     # Iterate through dataset
-    for example in ace_dataset[split_category][32*i:32*(i+1)]:
+    for example in ace_dataset[split_category]:
+
+        N += 1      #Count num samples
 
         # Matrix and bert token holder for current example
         matrix = list()
@@ -186,25 +198,50 @@ def produce_batch(ace_dataset, split_category, i):
             matrix[i] = torch.cat((bert_embedding[0][i], elem))
             assert len(matrix[i]) == (768 + 300 + 54 + 15 + 15)
 
-        # Append current example to matrix to output list
-        biLSTM_input_matrices.append(torch.stack(matrix))
-        gold_matrix_batch.append(torch.stack(gold_matrix))
+        matrix = torch.stack(matrix)
+        gold_matrix = torch.stack(gold_matrix)
 
+        max_len = 150
 
-    #   ---     Format data     --- #
-    max_len=150
+        for i in range(max_len - matrix.shape[0]):
+            matrix = torch.cat((matrix, torch.zeros(1, 1152)))
+            gold_matrix = torch.cat((gold_matrix, torch.zeros(1, 58)))
 
-    for i in range(max_len - biLSTM_input_matrices[0].shape[0]):
-        biLSTM_input_matrices[0] = torch.cat((biLSTM_input_matrices[0], torch.zeros(1, 1152)))
-        gold_matrix_batch[0] = torch.cat((gold_matrix_batch[0], torch.zeros(1, 58)))
+        with open(output_file, 'r') as f:
+            data = json.load(f)
+            f.close()
 
-    biLSTM_input_matrices = nn.utils.rnn.pad_sequence(biLSTM_input_matrices)
-    gold_matrix_batch = nn.utils.rnn.pad_sequence(gold_matrix_batch)
+        data['train']['X'] += matrix.tolist()
+        data['train']['Y'] += gold_matrix.tolist()
 
-    return biLSTM_input_matrices, gold_matrix_batch
+        with open(output_file, 'w') as f:
+            json.dump(data, f, indent=2)
+            f.close()
+
+        print(N)
+
+    with open(output_file, 'r') as f:
+        data = json.load(f)
+        f.close()
+
+    data['train']['N'] = N
+
+    with open(output_file, 'w') as f:
+        json.dump(data, f)
+        f.close()
+
 
 
 def train(input_file):
+
+    device = torch.device('CUDA')
+
+    #   --- Data prep   --- #
+    X, Y, N = input_file['train']['X'], input_file['train']['Y'], input_file['train']['N']
+    X = nn.utils.rnn.pad_sequence(torch.tensor(X)).float().to(device)
+    Y = nn.utils.rnn.pad_sequence(torch.tensor(Y)).float().to(device)
+
+
 
     #    ---- NN Setup  -----   #
     input_size = (768 + 300 + 54 + 15 + 15)
@@ -221,7 +258,6 @@ def train(input_file):
     epochs = 100
 
 
-    device = torch.device('cuda')
 
     class BiLSTM_Layer(nn.Module):
 
@@ -249,31 +285,38 @@ def train(input_file):
             return F.softmax(out, dim=1)
 
 
+
+
     #           ----        train           ----            #
     model = BiLSTM_Layer(input_size, hidden_size, num_layers, dropout, dense_input_size, dense_hidden_size,
                          dense_output_size).to(device)
-    model = model.float()
+    model = model.float().to(device)
     optimiser = torch.optim.Adam(model.parameters(), learning_rate, weight_decay=regularisation)
     loss = nn.CrossEntropyLoss()
 
     for epoch in range(epochs):
+
         print('epoch: ', epoch+1)
-        for i in range(len(ace_dataset['train'])):
 
+        for i in range(int(N/32)):
             model.zero_grad()
-
-            input, targets = produce_batch(ace_dataset, 'train', i)
-
+            input, targets = X[:, i*32:(i+1)*32, :], Y[:, i*32:(i+1)*32, :]
             scores = model(input.float())
             J = loss(scores, targets)
-            print(J)
             J.backward(retain_graph=True)
             optimiser.step()
-
             print("batch-loss: ", J)
 
+        model.zero_grad()
+        input, targets = X[:, N-(N%32):-1, :], Y[:, N-(N%32):-1, :]
+        scores = model(input.float())
+        J = loss(scores, targets)
+        J.backward(retain_graph=True)
+        optimiser.step()
+        print("batch-loss: ", J)
+
     with torch.no_grad():
-        scores = model(biLSTM_input_matrices.float())
+        scores = model(X.float())
 
     for i in range(batch_size):
         for j in range(sequence_length):
@@ -285,12 +328,14 @@ def train(input_file):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='egnn for ed')
     parser.add_argument('input_file', default="", type=str)
+    parser.add_argument('output_file', default="", type=str)
     args = parser.parse_args()
     input_file = args.input_file
+    output_file = args.output_file
 
     # Open ACE corpus from function params
     with open(input_file, 'r') as f:
         ace_dataset = json.load(f)
         f.close()
 
-    train(input_file)
+    train(ace_dataset)
