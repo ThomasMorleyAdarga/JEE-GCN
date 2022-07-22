@@ -14,15 +14,7 @@ from transformers import BertTokenizer, BertModel
 def produce_embeddings(ace_dataset, split_category, output_file):
 
     #Init device
-    device = torch.device('CUDA')
-
-    #Init JSON output
-    data = dict.fromkeys({'train', 'dev', 'test'})
-    data['train'] = dict.fromkeys({'X', 'Y', 'N'})
-    data['train']['X'], data['train']['Y'] = list(), list()
-    with open(output_file, "w") as f:
-        json.dump(data, f)
-        f.close()
+    device = torch.device('cuda')
 
     #Init N (number of samples total)
     N = 0
@@ -47,8 +39,8 @@ def produce_embeddings(ace_dataset, split_category, output_file):
                   'B-Business:Merge-Org': 54, 'B-Personnel:End-Position': 55, 'B-Movement:Transport': 56, 'None': 57}
 
     # Instantiate pretrained bert model and tokenizer !
-    berty = BertModel.from_pretrained("bert-base-uncased").float().to(device)
-    berty_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased').float().to(device)
+    berty = BertModel.from_pretrained("bert-base-uncased").to(device)
+    berty_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
 
     # Load glove embeddings
     glove_embeddings_dict = {}
@@ -146,14 +138,10 @@ def produce_embeddings(ace_dataset, split_category, output_file):
 
     #   ----    Iterate through dataset     ----    #
 
-    current_batch, current_gold_batch = list(), list()
-    encoding_batch_size = 128
-
-    #Handle dataset in batches
-    for batch in range(len(ace_dataset[split_category])/encoding_batch_size):
+    with open(output_file, 'a') as f:
 
         #Iterate examples in batch
-        for i, example in enumerate(ace_dataset[split_category][i*encoding_batch_size:(i+1)*encoding_batch_size]):
+        for example in ace_dataset[split_category]:
 
             N += 1      #Count num samples
 
@@ -168,87 +156,60 @@ def produce_embeddings(ace_dataset, split_category, output_file):
             for i, word in enumerate(example):
 
                 #Produce one hot vector for target
-                golden_event_label = torch.zeros(len(event_dict))
+                golden_event_label = np.zeros(len(event_dict)).tolist()
                 golden_event_label[event_dict.get(word['event-bio'])] = 1
-                golden_event_label = golden_event_label.float()
 
                 # Update bert token holder - this is necessary because the bert tokenizer wants multiple words at once otherwise individual letters are tokenized
                 bert_tokens.append(word['word'])
 
                 # Lookup glove embedding, use random embedding if word is not in glove dictionary
                 if word['word'] not in glove_embeddings_dict:
-                    glove_embedding = [torch.from_numpy(np.zeros(300))]
+                    glove_embedding = np.zeros(300).tolist()
                 else:
-                    glove_embedding = torch.tensor([glove_embeddings_dict[word['word']]])
+                    glove_embedding = glove_embeddings_dict[word['word']].tolist()
 
                 # Produce sum of one-hot vectors for entity embedding
-                entity_embedding = torch.zeros(len(entities_dict))
+                entity_embedding = np.zeros(len(entities_dict)).tolist()
                 for entity in word['entity-types']:
                     entity_embedding[entities_dict.get(entity)] = 1
 
                 # Look up random vectors from pos and dep dictionaries
-                pos_embedding = torch.from_numpy(pos_dict.get(word['pos-tag']))
-                dep_embedding = torch.from_numpy(dep_dict.get(word['syntax-label']))
+                pos_embedding = pos_dict.get(word['pos-tag']).tolist()
+                dep_embedding = dep_dict.get(word['syntax-label']).tolist()
 
                 # Create embedding for current word and add to current matrix for this example - bert section will be concatenated to the front later
-                matrix.append(torch.cat((
-                    glove_embedding[0],
-                    entity_embedding,
-                    pos_embedding,
-                    dep_embedding
-                )))
+                matrix.append(glove_embedding + (entity_embedding) + (pos_embedding) + (dep_embedding))
                 gold_matrix.append(golden_event_label)
 
             # Produce bert embedding for each word in current example at once
-            bert_embedding = berty(torch.tensor([berty_tokenizer.encode(bert_tokens, add_special_tokens=True)]).float().to(device))[0]
+            bert_embedding = berty(torch.tensor([berty_tokenizer.encode(bert_tokens, add_special_tokens=True)]).to(device))[0].tolist()
 
             # Concatenate bert embeddings
             for i, elem in enumerate(matrix):
                 if len(bert_embedding[0][i]) < 1:
-                    bert_embedding[0][i] = torch.from_numpy(np.random.rand(768))
-                matrix[i] = torch.cat((bert_embedding[0][i], elem))
+                    bert_embedding[0][i] = (np.random.rand(768)).tolist()
+                matrix[i] = bert_embedding[0][i]+elem
                 assert len(matrix[i]) == (768 + 300 + 54 + 15 + 15)
-
-            # Compile matrices for current example
-            matrix = torch.stack(matrix)
-            gold_matrix = torch.stack(gold_matrix)
 
             # Pad sequence dim to 150
             max_len = 150
-            for i in range(max_len - matrix.shape[0]):
-                matrix = torch.cat((matrix, torch.zeros(1, 1152)))
-                gold_matrix = torch.cat((gold_matrix, torch.zeros(1, 58)))
+            for i in range(max_len - len(matrix)):
+                matrix.append(np.zeros(shape=(1, 1152)).tolist())
+                gold_matrix.append(np.zeros(shape=(1, 58)).tolist())
 
-            # Append to batch
-            current_batch.append(matrix)
-            current_gold_batch.append(gold_matrix)
+            print(N)
 
+            for i in range(len(matrix)):
+                f.write(str(" ".join(map(str, matrix[i])) + "-" + " ".join(map(str, gold_matrix[i])) + "\n"))
 
-        # Save batch to JSON output
-        with open(output_file, 'r') as f:
-            data = json.load(f)
-            f.close()
-        with open(output_file, 'w') as f:
-            for i in range(len(current_batch)):
-                data['train']['X'] += current_batch[i].tolist()
-                data['train']['Y'] += current_gold_batch[i].tolist()
-            json.dump(data, f, indent=2)
-            f.close()
+        # Set N
+        f.write(N)
 
-    # Set N
-    with open(output_file, 'r') as f:
-        data = json.load(f)
-        f.close()
-    data['train']['N'] = N
-    with open(output_file, 'w') as f:
-        json.dump(data, f)
-        f.close()
-
-
+    f.close()
 
 def train(input_file):
 
-    device = torch.device('CUDA')
+    device = torch.device('cuda')
 
     #   --- Data prep   --- #
     X, Y, N = input_file['train']['X'], input_file['train']['Y'], input_file['train']['N']
@@ -352,4 +313,4 @@ if __name__ == "__main__":
         ace_dataset = json.load(f)
         f.close()
 
-    train(ace_dataset)
+    produce_embeddings(ace_dataset, 'train', output_file)
