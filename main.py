@@ -203,7 +203,7 @@ def produce_embeddings(ace_dataset, split_category, output_file):
                 f.write(str(" ".join(map(str, matrix[i])) + "-" + " ".join(map(str, gold_matrix[i])) + "\n"))
 
         # Set N
-        f.write(N)
+        f.write(str(N))
 
     f.close()
 
